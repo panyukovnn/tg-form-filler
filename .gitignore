@@ -1,0 +1,8 @@
+.env
+*/.env
+form_config.json
+*/form_config.json
+__pycache__/
+*.pyc
+.venv/
+venv/

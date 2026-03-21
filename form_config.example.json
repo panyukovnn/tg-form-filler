@@ -1,0 +1,20 @@
+{
+  "form_name": "Название формы",
+  "form_url": "https://docs.google.com/forms/d/e/YOUR_FORM_ID/formResponse",
+  "fields": [
+    {
+      "entry_id": "entry.XXXXXXXXX",
+      "name": "Название поля",
+      "description": "Описание поля для LLM",
+      "type": "dropdown",
+      "options": ["Вариант 1", "Вариант 2"]
+    },
+    {
+      "entry_id": "entry.XXXXXXXXX",
+      "name": "Текстовое поле",
+      "description": "Описание поля для LLM",
+      "type": "text",
+      "options": []
+    }
+  ]
+}
