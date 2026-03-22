@@ -2,9 +2,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from bot import create_app
+from tg_form_filler.bot import create_app
 
-if __name__ == "__main__":
+
+def main():
     app = create_app()
     print("Bot started. Press Ctrl+C to stop.")
     app.run_polling()
+
+
+if __name__ == "__main__":
+    main()

@@ -4,4 +4,4 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./form_config.json:/app/form_config.json
+      - ./form_configs:/app/form_configs

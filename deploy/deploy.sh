@@ -1,30 +1,29 @@
 #!/bin/bash
 
-# Конфигурация
 SSH_CONFIG=nvpnt
 REMOTE_DIR=tg-form-filler
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-SOURCE_FILES=(
-  "$PROJECT_DIR/Dockerfile"
-  "$PROJECT_DIR/requirements.txt"
-  "$PROJECT_DIR/main.py"
-  "$PROJECT_DIR/bot.py"
-  "$PROJECT_DIR/form_filler.py"
-  "$PROJECT_DIR/llm_handler.py"
-)
+echo "Создание директории $REMOTE_DIR на сервере (если не существует)..."
+ssh "$SSH_CONFIG" "mkdir -p $REMOTE_DIR"
 
-echo "Проверка наличия исходных файлов..."
-for f in "${SOURCE_FILES[@]}"; do
-  if [[ ! -f "$f" ]]; then
-    echo "Ошибка: файл не найден: $f"
+if ! ssh "$SSH_CONFIG" "[[ -f $REMOTE_DIR/.env ]]"; then
+  ENV_FILE="$SCRIPT_DIR/.env"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    echo "Ошибка: .env не найден на сервере и отсутствует в deploy/.env локально."
     exit 1
   fi
-done
+  echo "Отправка .env на сервер (первоначальная настройка)..."
+  scp "$ENV_FILE" "$SSH_CONFIG:$REMOTE_DIR/.env"
+fi
 
-echo "Копирование исходных файлов на сервер..."
-scp "${SOURCE_FILES[@]}" "$SSH_CONFIG:$REMOTE_DIR/"
+echo "Синхронизация файлов проекта на сервер..."
+rsync -av --delete \
+  --exclude='.env' \
+  --exclude='deploy/' \
+  "$PROJECT_DIR/" "$SSH_CONFIG:$REMOTE_DIR/"
 
 echo "Запуск приложения через docker-compose..."
 ssh "$SSH_CONFIG" "cd $REMOTE_DIR && docker compose up -d --build"

@@ -5,18 +5,20 @@ import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-from form_filler import format_result, submit_form
-from llm_handler import select_form_and_parse
+from tg_form_filler.form_filler import format_result, submit_form
+from tg_form_filler.llm_handler import select_form_and_parse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 TG_ADMIN_CHAT_ID = int(os.getenv("TG_ADMIN_CHAT_ID", "0"))
 
+FORM_CONFIGS_DIR = os.getenv("FORM_CONFIGS_DIR", "form_configs")
 FORM_CONFIGS = []
 for config_file in ("spending_diary_form_config.json", "food_diary_form_config.json"):
-    if os.path.exists(config_file):
-        with open(config_file, encoding="utf-8") as f:
+    path = os.path.join(FORM_CONFIGS_DIR, config_file)
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
             FORM_CONFIGS.append(json.load(f))
 
 if not FORM_CONFIGS:

@@ -1,12 +1,8 @@
 .DS_Store
 .env
 */.env
-form_config.json
-*/form_config.json
-spending_diary_form_config.json
-*/spending_diary_form_config.json
-food_diary_form_config.json
-*/food_diary_form_config.json
+form_configs/*.json
+!form_configs/*.example.json
 __pycache__/
 *.pyc
 .venv/
