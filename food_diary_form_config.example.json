@@ -1,0 +1,36 @@
+{
+  "form_id": "food_diary",
+  "form_name": "Приёмы пищи - форма ввода",
+  "form_description": "Дневник питания: запись приёмов пищи с указанием категории, блюда и порций овощей/белка",
+  "form_url": "https://docs.google.com/forms/d/e/YOUR_FORM_ID/formResponse",
+  "fields": [
+    {
+      "entry_id": "entry.XXXXXXXXX",
+      "name": "Категория",
+      "description": "Категория приёма пищи (Ранний завтрак, Завтрак, Ланч, Обед, Полдник, Ужин, Поздний ужин)",
+      "type": "radio",
+      "options": ["Ранний завтрак", "Завтрак", "Ланч", "Обед", "Полдник", "Ужин", "Поздний ужин"]
+    },
+    {
+      "entry_id": "entry.XXXXXXXXX",
+      "name": "Блюдо",
+      "description": "Название блюда или продукта",
+      "type": "text",
+      "options": []
+    },
+    {
+      "entry_id": "entry.XXXXXXXXX",
+      "name": "Порции овощей",
+      "description": "Количество порций овощей (0-6)",
+      "type": "dropdown",
+      "options": ["0", "1", "2", "3", "4", "5", "6"]
+    },
+    {
+      "entry_id": "entry.XXXXXXXXX",
+      "name": "Порции белка",
+      "description": "Количество порций белка (0-6)",
+      "type": "dropdown",
+      "options": ["0", "1", "2", "3", "4", "5", "6"]
+    }
+  ]
+}

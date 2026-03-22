@@ -1,5 +1,7 @@
 {
-  "form_name": "Название формы",
+  "form_id": "spending_diary",
+  "form_name": "Название формы расходов",
+  "form_description": "Дневник расходов: запись трат с категорией, суммой и комментарием",
   "form_url": "https://docs.google.com/forms/d/e/YOUR_FORM_ID/formResponse",
   "fields": [
     {
