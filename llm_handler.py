@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from datetime import datetime, timezone, timedelta
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
@@ -40,11 +41,29 @@ def parse_message_to_form_data(user_message: str, form_config: dict) -> dict:
     return json.loads(response.choices[0].message.content)
 
 
+def _get_meal_category(hour: int) -> str:
+    if 3 <= hour < 6:
+        return "Ранний завтрак"
+    elif 6 <= hour < 10:
+        return "Завтрак"
+    elif 10 <= hour < 12:
+        return "Ланч"
+    elif 12 <= hour < 15:
+        return "Обед"
+    elif 15 <= hour < 18:
+        return "Полдник"
+    elif 18 <= hour < 22:
+        return "Ужин"
+    else:
+        return "Поздний ужин"
+
+
 def select_form_and_parse(user_message: str, form_configs: list) -> tuple:
     """Use LLM tools to select the right form and extract field values."""
     tools = []
     for config in form_configs:
         properties = {}
+        required_fields = []
         for field in config["fields"]:
             prop = {
                 "type": "string",
@@ -53,6 +72,8 @@ def select_form_and_parse(user_message: str, form_configs: list) -> tuple:
             if field.get("options"):
                 prop["enum"] = field["options"]
             properties[field["entry_id"]] = prop
+            if field.get("required"):
+                required_fields.append(field["entry_id"])
 
         tools.append({
             "type": "function",
@@ -62,20 +83,29 @@ def select_form_and_parse(user_message: str, form_configs: list) -> tuple:
                 "parameters": {
                     "type": "object",
                     "properties": properties,
-                    "required": [],
+                    "required": required_fields,
                 },
             },
         })
 
+    now_msk = datetime.now(timezone(timedelta(hours=3)))
+    msk_time = now_msk.strftime("%H:%M")
+    meal_category = _get_meal_category(now_msk.hour)
+    system_message = f"Текущее время в Москве: {msk_time}. Если категория приёма пищи не указана явно, используй: {meal_category}."
+
     logger.info(
-        "LLM request — message: %r, tools: %s",
+        "LLM request — message: %r, system: %r, tools: %s",
         user_message,
+        system_message,
         json.dumps(tools, ensure_ascii=False),
     )
 
     response = client.chat.completions.create(
         model="deepseek-chat",
-        messages=[{"role": "user", "content": user_message}],
+        messages=[
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message},
+        ],
         tools=tools,
         tool_choice="required",
     )

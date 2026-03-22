@@ -1,4 +1,8 @@
+import logging
+
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 def submit_form(form_config: dict, field_values: dict) -> dict:
@@ -7,7 +11,13 @@ def submit_form(form_config: dict, field_values: dict) -> dict:
 
     payload = {k: v for k, v in field_values.items() if v}
 
+    logger.info("Submitting form %r to %s with payload: %s", form_config["form_name"], url, payload)
+
     response = requests.post(url, data=payload, timeout=10)
+
+    logger.info("Form response status: %s", response.status_code)
+    if not response.ok:
+        logger.error("Form error response body: %s", response.text)
 
     filled = {
         f["name"]: field_values.get(f["entry_id"], "")
