@@ -30,14 +30,20 @@ def _get_meal_category(hour: int) -> str:
 
 def select_form_and_parse(user_message: str, form_configs: list) -> tuple:
     """Use LLM tools to select the right form and extract field values."""
+    now_msk = datetime.now(timezone(timedelta(hours=3)))
+
     tools = []
     for config in form_configs:
         properties = {}
         required_fields = []
         for field in config["fields"]:
+            description = field["description"]
+            if field.get("auto_default") == "meal_category":
+                meal_category = _get_meal_category(now_msk.hour)
+                description += f" По умолчанию: {meal_category}."
             prop = {
                 "type": "string",
-                "description": field["description"],
+                "description": description,
             }
             if field.get("options"):
                 prop["enum"] = field["options"]
@@ -58,10 +64,7 @@ def select_form_and_parse(user_message: str, form_configs: list) -> tuple:
             },
         })
 
-    now_msk = datetime.now(timezone(timedelta(hours=3)))
-    msk_time = now_msk.strftime("%H:%M")
-    meal_category = _get_meal_category(now_msk.hour)
-    system_message = f"Текущее время в Москве: {msk_time}. Если категория приёма пищи не указана явно, используй: {meal_category}."
+    system_message = "Заполняй форму на основе сообщения пользователя."
 
     logger.info(
         "LLM request — message: %r, system: %r, tools: %s",
