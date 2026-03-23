@@ -1,17 +1,81 @@
+import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone, timedelta
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
 from tg_form_filler.form_filler import format_result, submit_form
-from tg_form_filler.llm_handler import select_form_and_parse
+from tg_form_filler.llm_handler import generate_spending_report, select_form_and_parse
+import tg_form_filler.stats as stats
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 TG_ADMIN_CHAT_ID = int(os.getenv("TG_ADMIN_CHAT_ID", "0"))
+
+MSK = timezone(timedelta(hours=3))
+
+_FOOD_FORM_ID = "food_diary"
+_SPENDING_FORM_ID = "spending_diary"
+_CHECK_INTERVAL_SEC = 30 * 60   # проверять каждые 30 минут
+_FOOD_GAP_HOURS = 8             # напомнить если > 8 часов без записи
+_REMINDER_COOLDOWN_SEC = 4 * 3600  # не чаще раза в 4 часа
+_DAY_START_HOUR = 8             # с 08:00 МСК
+_DAY_END_HOUR = 22              # до 22:00 МСК
+
+_last_food_diary_at: datetime = datetime.now(MSK)
+_last_reminder_sent_at: datetime | None = None
+
+
+async def _food_reminder_loop(app) -> None:
+    global _last_reminder_sent_at
+    while True:
+        await asyncio.sleep(_CHECK_INTERVAL_SEC)
+        now = datetime.now(MSK)
+        if not (_DAY_START_HOUR <= now.hour < _DAY_END_HOUR):
+            continue
+        if _last_reminder_sent_at and (now - _last_reminder_sent_at).total_seconds() < _REMINDER_COOLDOWN_SEC:
+            continue
+        hours_since = (now - _last_food_diary_at).total_seconds() / 3600
+        if hours_since >= _FOOD_GAP_HOURS:
+            logger.info("Sending food reminder (%.1f h since last entry)", hours_since)
+            await app.bot.send_message(
+                chat_id=TG_ADMIN_CHAT_ID,
+                text=f"Ты не записывал еду уже {int(hours_since)} ч. Не забудь записать приём пищи!",
+            )
+            _last_reminder_sent_at = now
+
+
+def _get_field_value(config: dict, field_name: str, field_values: dict) -> str:
+    for field in config["fields"]:
+        if field["name"] == field_name:
+            return field_values.get(field["entry_id"], "")
+    return ""
+
+
+async def _daily_spending_report_loop(app) -> None:
+    while True:
+        now = datetime.now(MSK)
+        next_report = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now >= next_report:
+            next_report += timedelta(days=1)
+        wait_sec = (next_report - now).total_seconds()
+        logger.info("Daily spending report scheduled in %.0f s", wait_sec)
+        await asyncio.sleep(wait_sec)
+
+        entries = stats.get_yesterday_entries()
+        stats.cleanup_old_entries()
+        report = generate_spending_report(entries)
+        logger.info("Sending daily spending report (%d entries)", len(entries))
+        await app.bot.send_message(chat_id=TG_ADMIN_CHAT_ID, text=report)
+
+
+async def _post_init(app) -> None:
+    asyncio.create_task(_food_reminder_loop(app))
+    asyncio.create_task(_daily_spending_report_loop(app))
 
 FORM_CONFIGS_DIR = os.getenv("FORM_CONFIGS_DIR", "form_configs")
 FORM_CONFIGS = []
@@ -45,6 +109,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         selected_config, field_values = select_form_and_parse(user_message, FORM_CONFIGS)
         logger.info("Selected form: %s", selected_config["form_name"])
         result = submit_form(selected_config, field_values)
+        if selected_config["form_id"] == _FOOD_FORM_ID:
+            global _last_food_diary_at
+            _last_food_diary_at = datetime.now(MSK)
+        if selected_config["form_id"] == _SPENDING_FORM_ID and result["success"]:
+            stats.add_entry(
+                category=_get_field_value(selected_config, "Категория", field_values),
+                item=_get_field_value(selected_config, "Товар", field_values),
+                price_str=_get_field_value(selected_config, "Цена", field_values),
+            )
         reply = f"Форма: {selected_config['form_name']}\n\n" + format_result(result)
     except Exception as e:
         logger.exception("Error processing message")
@@ -55,6 +128,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def create_app():
     token = os.getenv("TG_BOT_TOKEN")
-    app = ApplicationBuilder().token(token).build()
+    app = ApplicationBuilder().token(token).post_init(_post_init).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return app
