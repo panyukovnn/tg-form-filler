@@ -12,6 +12,7 @@ from tg_form_filler.llm_handler import generate_spending_report, select_form_and
 import tg_form_filler.stats as stats
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 TG_ADMIN_CHAT_ID = int(os.getenv("TG_ADMIN_CHAT_ID", "0"))
@@ -30,6 +31,21 @@ _last_food_diary_at: datetime = datetime.now(MSK)
 _last_reminder_sent_at: datetime | None = None
 
 
+def _daytime_hours_since(since: datetime, now: datetime) -> float:
+    """Считает количество часов в дневном окне [DAY_START, DAY_END) между двумя моментами."""
+    total = 0.0
+    cursor = since
+    while cursor < now:
+        day_start = cursor.replace(hour=_DAY_START_HOUR, minute=0, second=0, microsecond=0)
+        day_end = cursor.replace(hour=_DAY_END_HOUR, minute=0, second=0, microsecond=0)
+        window_start = max(cursor, day_start)
+        window_end = min(now, day_end)
+        if window_start < window_end:
+            total += (window_end - window_start).total_seconds() / 3600
+        cursor = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return total
+
+
 async def _food_reminder_loop(app) -> None:
     global _last_reminder_sent_at
     while True:
@@ -39,12 +55,12 @@ async def _food_reminder_loop(app) -> None:
             continue
         if _last_reminder_sent_at and (now - _last_reminder_sent_at).total_seconds() < _REMINDER_COOLDOWN_SEC:
             continue
-        hours_since = (now - _last_food_diary_at).total_seconds() / 3600
-        if hours_since >= _FOOD_GAP_HOURS:
-            logger.info("Sending food reminder (%.1f h since last entry)", hours_since)
+        daytime_hours = _daytime_hours_since(_last_food_diary_at, now)
+        if daytime_hours >= _FOOD_GAP_HOURS:
+            logger.info("Sending food reminder (%.1f daytime h since last entry)", daytime_hours)
             await app.bot.send_message(
                 chat_id=TG_ADMIN_CHAT_ID,
-                text=f"Ты не записывал еду уже {int(hours_since)} ч. Не забудь записать приём пищи!",
+                text=f"Ты не записывал еду уже {int(daytime_hours)} ч. Не забудь записать приём пищи!",
             )
             _last_reminder_sent_at = now
 
