@@ -8,7 +8,15 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
 from tg_form_filler.form_filler import format_result, submit_form
-from tg_form_filler.llm_handler import generate_spending_report, select_form_and_parse
+from tg_form_filler.llm_handler import (
+    generate_spending_report,
+    select_form_and_parse,
+    analyze_recent_meals,
+    generate_daily_nutrition_report,
+    generate_weekly_nutrition_report,
+    generate_monthly_nutrition_report,
+)
+import tg_form_filler.sheets_reader as sheets_reader
 import tg_form_filler.stats as stats
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -29,6 +37,8 @@ _DAY_END_HOUR = 22              # до 22:00 МСК
 
 _last_food_diary_at: datetime = datetime.now(MSK)
 _last_reminder_sent_at: datetime | None = None
+_MAX_COMMENT_HISTORY = 10
+_meal_comment_history: list[str] = []
 
 
 def _daytime_hours_since(since: datetime, now: datetime) -> float:
@@ -89,9 +99,78 @@ async def _daily_spending_report_loop(app) -> None:
         await app.bot.send_message(chat_id=TG_ADMIN_CHAT_ID, text=report)
 
 
+async def _daily_nutrition_report_loop(app) -> None:
+    while True:
+        now = datetime.now(MSK)
+        next_report = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        wait_sec = (next_report - now).total_seconds()
+        logger.info("Daily nutrition report scheduled in %.0f s", wait_sec)
+        await asyncio.sleep(wait_sec)
+
+        try:
+            yesterday = datetime.now(MSK) - timedelta(days=1)
+            entries = sheets_reader.get_entries_for_date(yesterday)
+            report = generate_daily_nutrition_report(entries)
+            logger.info("Sending daily nutrition report (%d entries)", len(entries))
+            await app.bot.send_message(chat_id=TG_ADMIN_CHAT_ID, text=report)
+        except Exception:
+            logger.exception("Error generating daily nutrition report")
+
+
+async def _weekly_nutrition_report_loop(app) -> None:
+    while True:
+        now = datetime.now(MSK)
+        days_until_monday = (7 - now.weekday()) % 7
+        if days_until_monday == 0 and now.hour >= 0:
+            days_until_monday = 7
+        next_report = (now + timedelta(days=days_until_monday)).replace(
+            hour=0, minute=5, second=0, microsecond=0
+        )
+        wait_sec = (next_report - now).total_seconds()
+        logger.info("Weekly nutrition report scheduled in %.0f s", wait_sec)
+        await asyncio.sleep(wait_sec)
+
+        try:
+            end_date = datetime.now(MSK) - timedelta(days=1)
+            start_date = end_date - timedelta(days=6)
+            entries = sheets_reader.get_entries_for_range(start_date, end_date)
+            report = generate_weekly_nutrition_report(entries)
+            logger.info("Sending weekly nutrition report (%d entries)", len(entries))
+            await app.bot.send_message(chat_id=TG_ADMIN_CHAT_ID, text=report)
+        except Exception:
+            logger.exception("Error generating weekly nutrition report")
+
+
+async def _monthly_nutrition_report_loop(app) -> None:
+    while True:
+        now = datetime.now(MSK)
+        if now.month == 12:
+            next_month_first = now.replace(year=now.year + 1, month=1, day=1,
+                                           hour=0, minute=10, second=0, microsecond=0)
+        else:
+            next_month_first = now.replace(month=now.month + 1, day=1,
+                                           hour=0, minute=10, second=0, microsecond=0)
+        wait_sec = (next_month_first - now).total_seconds()
+        logger.info("Monthly nutrition report scheduled in %.0f s", wait_sec)
+        await asyncio.sleep(wait_sec)
+
+        try:
+            end_date = datetime.now(MSK) - timedelta(days=1)
+            start_date = end_date.replace(day=1)
+            entries = sheets_reader.get_entries_for_range(start_date, end_date)
+            report = generate_monthly_nutrition_report(entries)
+            logger.info("Sending monthly nutrition report (%d entries)", len(entries))
+            await app.bot.send_message(chat_id=TG_ADMIN_CHAT_ID, text=report)
+        except Exception:
+            logger.exception("Error generating monthly nutrition report")
+
+
 async def _post_init(app) -> None:
     asyncio.create_task(_food_reminder_loop(app))
     asyncio.create_task(_daily_spending_report_loop(app))
+    asyncio.create_task(_daily_nutrition_report_loop(app))
+    asyncio.create_task(_weekly_nutrition_report_loop(app))
+    asyncio.create_task(_monthly_nutrition_report_loop(app))
 
 FORM_CONFIGS_DIR = os.getenv("FORM_CONFIGS_DIR", "form_configs")
 FORM_CONFIGS = []
@@ -125,16 +204,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         selected_config, field_values = select_form_and_parse(user_message, FORM_CONFIGS)
         logger.info("Selected form: %s", selected_config["form_name"])
         result = submit_form(selected_config, field_values)
+        reply = f"Форма: {selected_config['form_name']}\n\n" + format_result(result)
         if selected_config["form_id"] == _FOOD_FORM_ID:
             global _last_food_diary_at
             _last_food_diary_at = datetime.now(MSK)
+            if result["success"]:
+                try:
+                    recent = sheets_reader.get_last_entries(n=10)
+                    if recent:
+                        analysis = analyze_recent_meals(recent, _meal_comment_history)
+                        if analysis:
+                            reply += f"\n\n{analysis}"
+                            _meal_comment_history.append(analysis)
+                            if len(_meal_comment_history) > _MAX_COMMENT_HISTORY:
+                                _meal_comment_history.pop(0)
+                except Exception:
+                    logger.exception("Error analyzing recent meals")
         if selected_config["form_id"] == _SPENDING_FORM_ID and result["success"]:
             stats.add_entry(
                 category=_get_field_value(selected_config, "Категория", field_values),
                 item=_get_field_value(selected_config, "Товар", field_values),
                 price_str=_get_field_value(selected_config, "Цена", field_values),
             )
-        reply = f"Форма: {selected_config['form_name']}\n\n" + format_result(result)
     except Exception as e:
         logger.exception("Error processing message")
         reply = f"Произошла ошибка: {e}"

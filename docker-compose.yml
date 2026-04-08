@@ -5,3 +5,4 @@ services:
     env_file: .env
     volumes:
       - ./form_configs:/app/form_configs
+      - ./rules:/app/rules
