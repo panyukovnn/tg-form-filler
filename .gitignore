@@ -3,6 +3,8 @@
 */.env
 form_configs/*.json
 !form_configs/*.example.json
+credentials.json
+deploy/credentials.json
 __pycache__/
 *.pyc
 .venv/

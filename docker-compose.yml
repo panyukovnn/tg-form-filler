@@ -6,3 +6,4 @@ services:
     volumes:
       - ./form_configs:/app/form_configs
       - ./rules:/app/rules
+      - ./credentials.json:/app/credentials.json:ro

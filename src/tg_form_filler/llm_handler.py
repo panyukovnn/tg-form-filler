@@ -27,7 +27,7 @@ def _load_nutrition_rules() -> str:
             _nutrition_rules = ""
     return _nutrition_rules
 
-def _get_meal_category(hour: int) -> str:
+def get_meal_category(hour: int) -> str:
     if 3 <= hour < 6:
         return "Ранний завтрак"
     elif 6 <= hour < 10:
@@ -44,8 +44,19 @@ def _get_meal_category(hour: int) -> str:
         return "Поздний ужин"
 
 
-def select_form_and_parse(user_message: str, form_configs: list) -> tuple:
-    """Use LLM tools to select the right form and extract field values."""
+def compute_auto_default(auto_kind: str, now: datetime) -> str | None:
+    if auto_kind == "meal_category":
+        return get_meal_category(now.hour)
+    return None
+
+
+def select_form_and_parse(user_message: str, form_configs: list, chat_history: list[dict] | None = None) -> tuple:
+    """Use LLM tools to select the right form and extract field values.
+
+    Returns:
+        ("submit", config, field_values) — для новой записи
+        ("edit", config, entry_offset, field_values) — для редактирования
+    """
     now_msk = datetime.now(timezone(timedelta(hours=3)))
 
     tools = []
@@ -54,9 +65,16 @@ def select_form_and_parse(user_message: str, form_configs: list) -> tuple:
         required_fields = []
         for field in config["fields"]:
             description = field["description"]
-            if field.get("auto_default") == "meal_category":
-                meal_category = _get_meal_category(now_msk.hour)
-                description += f" Значение по умолчанию (уже вычислено приложением, использовать точно): {meal_category}."
+            auto_kind = field.get("auto_default")
+            if auto_kind:
+                default_value = compute_auto_default(auto_kind, now_msk)
+                if default_value is not None:
+                    description += (
+                        f" Если пользователь НЕ указал значение этого поля явно, "
+                        f"НЕ заполняй его — приложение автоматически подставит "
+                        f"значение по умолчанию: '{default_value}'. "
+                        f"Указывай это поле ТОЛЬКО если пользователь явно назвал другое значение."
+                    )
             prop = {
                 "type": "string",
                 "description": description,
@@ -64,9 +82,12 @@ def select_form_and_parse(user_message: str, form_configs: list) -> tuple:
             if field.get("options"):
                 prop["enum"] = field["options"]
             properties[field["entry_id"]] = prop
-            if field.get("required"):
+            # Поля с auto_default не required — если LLM их не вернёт,
+            # приложение подставит значение по умолчанию.
+            if field.get("required") and not auto_kind:
                 required_fields.append(field["entry_id"])
 
+        # Tool для новой записи
         tools.append({
             "type": "function",
             "function": {
@@ -80,7 +101,44 @@ def select_form_and_parse(user_message: str, form_configs: list) -> tuple:
             },
         })
 
-    system_message = "Заполняй форму на основе сообщения пользователя."
+        # Tool для редактирования существующей записи
+        edit_properties = {
+            "entry_offset": {
+                "type": "integer",
+                "description": "Какую запись редактировать: 1 = последняя, 2 = предпоследняя, и т.д.",
+            },
+        }
+        for field in config["fields"]:
+            # При редактировании auto_default поля тоже доступны (можно явно изменить)
+            prop = {
+                "type": "string",
+                "description": field["description"],
+            }
+            if field.get("options"):
+                prop["enum"] = field["options"]
+            edit_properties[field["entry_id"]] = prop
+
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": f"edit_{config['form_id']}",
+                "description": f"Редактировать существующую запись в форме '{config['form_name']}'. "
+                               f"Указывай только те поля, которые нужно изменить.",
+                "parameters": {
+                    "type": "object",
+                    "properties": edit_properties,
+                    "required": ["entry_offset"],
+                },
+            },
+        })
+
+    system_message = (
+        "Ты помощник для заполнения форм. "
+        "Если пользователь упоминает продукт, блюдо или расход — это ВСЕГДА новая запись, используй основную форму. "
+        "Используй edit-форму ТОЛЬКО если пользователь ЯВНО просит исправить, изменить или отредактировать "
+        "уже записанные данные (например: 'исправь', 'поменяй', 'ошибся', 'измени'). "
+        "Редактировать можно только последние 3 записи (entry_offset от 1 до 3)."
+    )
 
     logger.info(
         "LLM request — message: %r, system: %r, tools: %s",
@@ -89,12 +147,14 @@ def select_form_and_parse(user_message: str, form_configs: list) -> tuple:
         json.dumps(tools, ensure_ascii=False),
     )
 
+    messages = [{"role": "system", "content": system_message}]
+    if chat_history:
+        messages.extend(chat_history)
+    messages.append({"role": "user", "content": user_message})
+
     response = client.chat.completions.create(
         model="deepseek-chat",
-        messages=[
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
-        ],
+        messages=messages,
         tools=tools,
         tool_choice="required",
     )
@@ -105,18 +165,27 @@ def select_form_and_parse(user_message: str, form_configs: list) -> tuple:
 
     logger.info("LLM selected form: %r, field values: %s", form_id, json.dumps(field_values, ensure_ascii=False))
 
-    selected_config = next(c for c in form_configs if c["form_id"] == form_id)
-    return selected_config, field_values
+    if form_id.startswith("edit_"):
+        original_form_id = form_id[len("edit_"):]
+        selected_config = next(c for c in form_configs if c["form_id"] == original_form_id)
+        entry_offset = field_values.pop("entry_offset", 1)
+        return "edit", selected_config, entry_offset, field_values
+    else:
+        selected_config = next(c for c in form_configs if c["form_id"] == form_id)
+        return "submit", selected_config, field_values
 
 
-def generate_spending_report(entries: list) -> str:
-    """Generate a brief daily spending report using LLM."""
+def generate_spending_report(entries: list[dict]) -> str:
+    """Generate a brief daily spending report using LLM.
+
+    Each entry is a dict with keys: category, item, price (float).
+    """
     if not entries:
         return "Вчера расходов не зафиксировано."
 
-    total = sum(e.price for e in entries)
+    total = sum(e["price"] for e in entries)
     entries_text = "\n".join(
-        f"- {e.category}: {e.item} — {e.price:.0f} ₽"
+        f"- {e['category']}: {e['item']} — {e['price']:.0f} ₽"
         for e in entries
     )
 
@@ -148,25 +217,52 @@ def _format_entries_text(entries: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_DRINK_TRUE_VALUES = {"да", "true", "1", "yes"}
+
+
+def is_drink_row(entry: dict) -> bool:
+    return (entry.get("Напиток") or "").strip().lower() in _DRINK_TRUE_VALUES
+
+
+def _filter_out_drinks(entries: list[dict]) -> list[dict]:
+    """Отфильтровать записи-напитки (колонка 'Напиток' помечена как истинная)."""
+    return [e for e in entries if not is_drink_row(e)]
+
+
 def analyze_recent_meals(entries: list[dict], previous_comments: list[str] | None = None) -> str:
-    """Анализ последних приёмов пищи — короткий отзыв (1-2 предложения)."""
+    """Анализ последних приёмов пищи — короткий отзыв (1-2 предложения).
+
+    Для напитков (поле 'Напиток' == 'Да' в последней записи) возвращает пустую строку —
+    напитки не комментируются как приёмы пищи.
+    """
     rules = _load_nutrition_rules()
     if not entries:
         return ""
 
-    entries_text = _format_entries_text(entries)
+    last_entry = entries[-1]
+    if is_drink_row(last_entry):
+        logger.info("Skipping nutrition comment — last entry is a drink")
+        return ""
+
+    # Исключаем напитки из контекста — они не должны учитываться в анализе еды
+    food_entries = [e for e in entries if not is_drink_row(e)]
+    if not food_entries:
+        return ""
+
+    entries_text = _format_entries_text(food_entries)
 
     system_prompt = (
         f"{rules}\n\n"
-        "Ты получаешь список последних приёмов пищи пользователя. "
-        "Дай короткий отзыв на последний приём пищи (1-2 предложения), "
+        "Ты получаешь список последних приёмов пищи пользователя в хронологическом порядке. "
+        "ПОСЛЕДНИЙ элемент списка — это приём пищи, который пользователь только что добавил. "
+        "Дай короткий отзыв ТОЛЬКО на этот последний приём пищи (1-2 предложения), "
         "учитывая контекст предыдущих приёмов за день. "
         "Следуй правилам из инструкции выше — формат ответа на каждый приём пищи.\n\n"
         "ВАЖНО: не повторяй советы и формулировки из своих предыдущих комментариев. "
         "Разнообразь ответы — подмечай разные аспекты питания."
     )
 
-    user_content = f"Последние приёмы пищи:\n{entries_text}"
+    user_content = f"Последние приёмы пищи (последний — только что добавленный):\n{entries_text}"
     if previous_comments:
         comments_text = "\n".join(f"- {c}" for c in previous_comments)
         user_content += f"\n\nТвои предыдущие комментарии (НЕ повторяй их):\n{comments_text}"
@@ -185,6 +281,7 @@ def analyze_recent_meals(entries: list[dict], previous_comments: list[str] | Non
 def generate_daily_nutrition_report(entries: list[dict]) -> str:
     """Дневной отчёт о питании."""
     rules = _load_nutrition_rules()
+    entries = _filter_out_drinks(entries)
     if not entries:
         return "За вчера записей о питании не найдено."
 
@@ -212,6 +309,7 @@ def generate_daily_nutrition_report(entries: list[dict]) -> str:
 def generate_weekly_nutrition_report(entries: list[dict]) -> str:
     """Недельный отчёт о питании."""
     rules = _load_nutrition_rules()
+    entries = _filter_out_drinks(entries)
     if not entries:
         return "За прошедшую неделю записей о питании не найдено."
 
@@ -243,6 +341,7 @@ def generate_weekly_nutrition_report(entries: list[dict]) -> str:
 def generate_monthly_nutrition_report(entries: list[dict]) -> str:
     """Месячный отчёт о питании."""
     rules = _load_nutrition_rules()
+    entries = _filter_out_drinks(entries)
     if not entries:
         return "За прошедший месяц записей о питании не найдено."
 

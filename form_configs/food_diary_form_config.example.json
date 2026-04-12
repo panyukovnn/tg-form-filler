@@ -3,6 +3,7 @@
   "form_name": "Приёмы пищи - форма ввода",
   "form_description": "Дневник питания: запись приёмов пищи с указанием категории, блюда и порций овощей/белка",
   "form_url": "https://docs.google.com/forms/d/e/YOUR_FORM_ID/formResponse",
+  "spreadsheet_id": "YOUR_SPREADSHEET_ID",
   "fields": [
     {
       "entry_id": "entry.XXXXXXXXX",
@@ -31,6 +32,13 @@
       "description": "Количество порций белка (0-6)",
       "type": "dropdown",
       "options": ["0", "1", "2", "3", "4", "5", "6"]
+    },
+    {
+      "entry_id": "entry.XXXXXXXXX",
+      "name": "Напиток",
+      "description": "Это напиток (кофе, чай, вода, сок, морс, алкоголь и т.п.)? 'Да' для напитков, 'Нет' для еды. Смузи, протеиновые коктейли и подобные калорийные напитки, заменяющие приём пищи, — это 'Нет'.",
+      "type": "radio",
+      "options": ["Да", "Нет"]
     }
   ]
 }

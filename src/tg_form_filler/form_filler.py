@@ -9,7 +9,8 @@ def submit_form(form_config: dict, field_values: dict) -> dict:
     """Submit Google Form with given field values."""
     url = form_config["form_url"]
 
-    payload = {k: v for k, v in field_values.items() if v}
+    sheet_only_ids = {f["entry_id"] for f in form_config["fields"] if f.get("sheet_only")}
+    payload = {k: v for k, v in field_values.items() if v and k not in sheet_only_ids}
 
     logger.info("Submitting form %r to %s with payload: %s", form_config["form_name"], url, payload)
 
