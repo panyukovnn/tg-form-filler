@@ -40,15 +40,19 @@ def get_last_entries(n: int = 10) -> list[dict]:
 
 
 def get_entries_for_date(date: datetime) -> list[dict]:
-    """Получить все записи за конкретный день."""
+    """Получить все записи за конкретный день в хронологическом порядке."""
     date_str = date.strftime("%Y-%m-%d")
-    return _query(f"SELECT * WHERE toDate(A) = date '{date_str}'")
+    rows = _query(f"SELECT * WHERE toDate(A) = date '{date_str}'")
+    rows.reverse()
+    return rows
 
 
 def get_entries_for_range(start_date: datetime, end_date: datetime) -> list[dict]:
-    """Получить записи за диапазон дат."""
+    """Получить записи за диапазон дат в хронологическом порядке."""
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
-    return _query(
+    rows = _query(
         f"SELECT * WHERE toDate(A) >= date '{start_str}' AND toDate(A) <= date '{end_str}'"
     )
+    rows.reverse()
+    return rows

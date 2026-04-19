@@ -351,14 +351,15 @@ def _merge_field_value(field: dict, old_val: str, new_val: str) -> str:
     return old_val or new_val
 
 
-def _handle_merge(selected_config: dict, new_values: dict) -> str | None:
+def _handle_merge(selected_config: dict, new_values: dict) -> tuple[str, int | None] | None:
     """Объединить новый приём пищи с последней записью в Google Sheets.
 
-    Возвращает текст ответа для пользователя или None если последней записи нет.
+    Возвращает (reply, row_number) либо (reply, None), если объединять было нечего.
+    Возвращает None если подходящей записи для объединения вообще не нашлось.
     """
     spreadsheet_id = selected_config.get("spreadsheet_id", "")
     if not spreadsheet_id:
-        return "Ошибка: spreadsheet_id не указан в конфигурации формы."
+        return "Ошибка: spreadsheet_id не указан в конфигурации формы.", None
 
     sheet_name = selected_config.get("sheet_name", "")
     newest_first = selected_config.get("newest_first", False)
@@ -402,13 +403,13 @@ def _handle_merge(selected_config: dict, new_values: dict) -> str | None:
             changes.append(f"  {field_name}: {old_val or '—'} → {merged}")
 
     if not updates:
-        return "Нечего объединять — новых данных не оказалось."
+        return "Нечего объединять — новых данных не оказалось.", None
 
     sheets_editor.update_cells(
         spreadsheet_id, target["row_number"], updates, sheet_name=sheet_name
     )
     logger.info("Merged food entry into row %d", target["row_number"])
-    return "🔗 Объединил с предыдущей записью!\n\n" + "\n".join(changes)
+    return "🔗 Объединил с предыдущей записью!\n\n" + "\n".join(changes), target["row_number"]
 
 
 async def _update_sheet_only_fields(selected_config: dict, field_values: dict) -> None:
@@ -483,6 +484,59 @@ async def _update_sheet_only_fields(selected_config: dict, field_values: dict) -
                     len(updates), target["row_number"])
 
 
+def _append_nutrition_comment(
+    selected_config: dict,
+    reply: str,
+    *,
+    extra_entry: dict | None = None,
+    focus_row_number: int | None = None,
+) -> str:
+    """Дополнить ответ комментарием нутрициолога по последним приёмам пищи.
+
+    extra_entry — данные только что отправленной записи (нужно для submit, т.к. строка
+    могла ещё не появиться в таблице из-за пропагации Google Forms → Sheets).
+    focus_row_number — номер строки в таблице, на которую нужно обратить внимание
+    (используется при edit/merge, чтобы анализатор смотрел именно на изменённую запись).
+    """
+    if selected_config.get("form_id") != _FOOD_FORM_ID:
+        return reply
+    try:
+        spreadsheet_id = selected_config.get("spreadsheet_id", "")
+        sheet_name = selected_config.get("sheet_name", "")
+        newest_first = selected_config.get("newest_first", False)
+        rows = sheets_editor.get_last_rows(
+            spreadsheet_id, n=9, sheet_name=sheet_name, newest_first=newest_first
+        )
+        recent = [dict(zip(r["headers"], r["values"])) for r in rows]
+        if extra_entry is not None:
+            recent.append(extra_entry)
+        elif focus_row_number is not None:
+            idx = next(
+                (i for i, r in enumerate(rows) if r["row_number"] == focus_row_number),
+                None,
+            )
+            if idx is None:
+                # Изменённая запись вне окна — не комментируем, чтобы
+                # случайно не написать отзыв о другой записи.
+                return reply
+            # Оставляем только записи до изменённой включительно, чтобы она
+            # была последней и по позиции, и по времени — иначе LLM видит,
+            # что у «последней» записи таймстамп старее соседних, и
+            # переключается на более свежую запись.
+            recent = recent[: idx + 1]
+        if not recent:
+            return reply
+        analysis = analyze_recent_meals(recent, _meal_comment_history)
+        if analysis:
+            reply += f"\n\n{analysis}"
+            _meal_comment_history.append(analysis)
+            if len(_meal_comment_history) > _MAX_COMMENT_HISTORY:
+                _meal_comment_history.pop(0)
+    except Exception:
+        logger.exception("Error analyzing recent meals")
+    return reply
+
+
 async def _submit_food_entry(selected_config: dict, field_values: dict) -> str:
     """Отправить запись в дневник питания + получить комментарий нутрициолога."""
     global _last_food_diary_at, _last_food_entry_at
@@ -505,52 +559,37 @@ async def _submit_food_entry(selected_config: dict, field_values: dict) -> str:
     except Exception:
         logger.exception("Error updating sheet-only fields")
 
-    try:
-        spreadsheet_id = selected_config.get("spreadsheet_id", "")
-        sheet_name = selected_config.get("sheet_name", "")
-        newest_first = selected_config.get("newest_first", False)
-        rows = sheets_editor.get_last_rows(
-            spreadsheet_id, n=9, sheet_name=sheet_name, newest_first=newest_first
-        )
-        recent = [dict(zip(r["headers"], r["values"])) for r in rows]
-        # Только что отправленная запись добавляется в конец, т.к. данные формы
-        # могут ещё не появиться в таблице
-        just_added = {
-            field["name"]: field_values.get(field["entry_id"], "")
-            for field in selected_config["fields"]
-        }
-        recent.append(just_added)
-        if recent:
-            analysis = analyze_recent_meals(recent, _meal_comment_history)
-            if analysis:
-                reply += f"\n\n{analysis}"
-                _meal_comment_history.append(analysis)
-                if len(_meal_comment_history) > _MAX_COMMENT_HISTORY:
-                    _meal_comment_history.pop(0)
-    except Exception:
-        logger.exception("Error analyzing recent meals")
-    return reply
+    just_added = {
+        field["name"]: field_values.get(field["entry_id"], "")
+        for field in selected_config["fields"]
+    }
+    return _append_nutrition_comment(selected_config, reply, extra_entry=just_added)
 
 
-def _handle_edit(selected_config: dict, entry_offset: int, field_values: dict) -> str:
-    """Редактирование существующей записи в Google Sheets."""
+def _handle_edit(
+    selected_config: dict, entry_offset: int, field_values: dict
+) -> tuple[str, int | None]:
+    """Редактирование существующей записи в Google Sheets.
+
+    Возвращает (reply, row_number); row_number = None, если запись не была изменена.
+    """
     spreadsheet_id = selected_config.get("spreadsheet_id", "")
     if not spreadsheet_id:
-        return "Ошибка: spreadsheet_id не указан в конфигурации формы."
+        return "Ошибка: spreadsheet_id не указан в конфигурации формы.", None
 
     sheet_name = selected_config.get("sheet_name", "")
     newest_first = selected_config.get("newest_first", False)
     rows = sheets_editor.get_last_rows(spreadsheet_id, n=max(entry_offset, 5),
                                        sheet_name=sheet_name, newest_first=newest_first)
     if not rows:
-        return "Не найдено записей для редактирования."
+        return "Не найдено записей для редактирования.", None
 
     max_editable = 3
     if entry_offset < 1 or entry_offset > max_editable:
-        return f"Можно редактировать только последние {max_editable} записи."
+        return f"Можно редактировать только последние {max_editable} записи.", None
 
     if entry_offset > len(rows):
-        return f"Запись #{entry_offset} не найдена. Доступно записей: {len(rows)}."
+        return f"Запись #{entry_offset} не найдена. Доступно записей: {len(rows)}.", None
 
     target = rows[-entry_offset]
     headers = target["headers"]
@@ -572,11 +611,11 @@ def _handle_edit(selected_config: dict, entry_offset: int, field_values: dict) -
                 changes.append(f"  {field_name}: {old_value or '—'} → {new_value}")
 
     if not updates:
-        return "Не указаны поля для изменения."
+        return "Не указаны поля для изменения.", None
 
     sheets_editor.update_cells(spreadsheet_id, target["row_number"], updates, sheet_name=sheet_name)
 
-    return "✏️ Запись исправлена!\n\n" + "\n".join(changes)
+    return "✏️ Запись исправлена!\n\n" + "\n".join(changes), target["row_number"]
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -604,17 +643,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pending = _pending_merge
             _pending_merge = None
             try:
-                merge_reply = _handle_merge(pending["config"], pending["new_values"])
+                merge_result = _handle_merge(pending["config"], pending["new_values"])
             except Exception:
                 logger.exception("Error merging meal")
-                merge_reply = None
-            if merge_reply is None:
+                merge_result = None
+            if merge_result is None:
                 # fallback: записываем как новый приём
                 merge_reply = await _submit_food_entry(pending["config"], pending["new_values"])
             else:
+                merge_reply, merged_row = merge_result
                 now_merged = datetime.now(MSK)
                 _last_food_diary_at = now_merged
                 _last_food_entry_at = now_merged
+                if merged_row is not None:
+                    merge_reply = _append_nutrition_comment(
+                        pending["config"], merge_reply, focus_row_number=merged_row
+                    )
             pre_replies.append(merge_reply)
             pending_handled_fully = True
         elif _is_negative(user_message):
@@ -662,7 +706,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if action == "edit":
             _, selected_config, entry_offset, field_values = parsed
             logger.info("Editing form: %s, offset: %d", selected_config["form_name"], entry_offset)
-            reply = _handle_edit(selected_config, entry_offset, field_values)
+            reply, edited_row = _handle_edit(selected_config, entry_offset, field_values)
+            if edited_row is not None:
+                reply = _append_nutrition_comment(
+                    selected_config, reply, focus_row_number=edited_row
+                )
         else:
             _, selected_config, field_values = parsed
             logger.info("Selected form: %s", selected_config["form_name"])
