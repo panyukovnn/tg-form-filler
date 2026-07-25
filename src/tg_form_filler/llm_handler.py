@@ -12,6 +12,8 @@ client = OpenAI(
     base_url="https://api.deepseek.com",
 )
 
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+
 _RULES_DIR = os.getenv("NUTRITION_RULES_DIR", "rules")
 _nutrition_rules: str | None = None
 
@@ -153,7 +155,7 @@ def select_form_and_parse(user_message: str, form_configs: list, chat_history: l
     messages.append({"role": "user", "content": user_message})
 
     response = client.chat.completions.create(
-        model="deepseek-chat",
+        model=DEEPSEEK_MODEL,
         messages=messages,
         tools=tools,
         tool_choice="required",
@@ -198,7 +200,7 @@ def generate_spending_report(entries: list[dict]) -> str:
     logger.info("Generating spending report for %d entries, total %.0f ₽", len(entries), total)
 
     response = client.chat.completions.create(
-        model="deepseek-chat",
+        model=DEEPSEEK_MODEL,
         messages=[
             {"role": "system", "content": "Ты помощник по личным финансам. Пиши кратко и по делу на русском языке."},
             {"role": "user", "content": prompt},
@@ -268,7 +270,7 @@ def analyze_recent_meals(entries: list[dict], previous_comments: list[str] | Non
         user_content += f"\n\nТвои предыдущие комментарии (НЕ повторяй их):\n{comments_text}"
 
     response = client.chat.completions.create(
-        model="deepseek-chat",
+        model=DEEPSEEK_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
@@ -300,7 +302,7 @@ def generate_daily_nutrition_report(entries: list[dict]) -> str:
     )
 
     response = client.chat.completions.create(
-        model="deepseek-chat",
+        model=DEEPSEEK_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Приёмы пищи за день:\n{entries_text}"},
@@ -337,7 +339,7 @@ def generate_weekly_nutrition_report(entries: list[dict]) -> str:
     )
 
     response = client.chat.completions.create(
-        model="deepseek-chat",
+        model=DEEPSEEK_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Приёмы пищи за неделю:\n{entries_text}"},
@@ -375,7 +377,7 @@ def generate_monthly_nutrition_report(entries: list[dict]) -> str:
     )
 
     response = client.chat.completions.create(
-        model="deepseek-chat",
+        model=DEEPSEEK_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Приёмы пищи за месяц:\n{entries_text}"},
