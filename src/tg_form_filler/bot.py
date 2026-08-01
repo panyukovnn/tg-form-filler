@@ -33,19 +33,12 @@ MSK = timezone(timedelta(hours=3))
 
 _FOOD_FORM_ID = "food_diary"
 _SPENDING_FORM_ID = "spending_diary"
-_CHECK_INTERVAL_SEC = 30 * 60   # проверять каждые 30 минут
-_FOOD_GAP_HOURS = 8             # напомнить если > 8 часов без записи
-_REMINDER_COOLDOWN_SEC = 4 * 3600  # не чаще раза в 4 часа
-_DAY_START_HOUR = 8             # с 08:00 МСК
-_DAY_END_HOUR = 22              # до 22:00 МСК
 _MERGE_WINDOW_SEC = 10 * 60     # предлагать объединение если прошло < 10 минут
 _PENDING_MERGE_TTL_SEC = 15 * 60  # подтверждение объединения живёт 15 минут
 
-_last_food_diary_at: datetime = datetime.now(MSK)
 _last_food_entry_at: datetime | None = None  # для merge-логики (None до первой записи)
-_last_reminder_sent_at: datetime | None = None
 _MAX_COMMENT_HISTORY = 10
-_meal_comment_history: list[str] = []
+_meal_comment_history: list[tuple[str, str]] = []  # (дата YYYY-MM-DD, комментарий)
 _MAX_CHAT_HISTORY = 10
 _chat_history: list[dict] = []
 _pending_merge: dict | None = None
@@ -72,40 +65,6 @@ async def _reply_md(message, text: str):
         telegramify_markdown.markdownify(text),
         parse_mode=ParseMode.MARKDOWN_V2,
     )
-
-
-def _daytime_hours_since(since: datetime, now: datetime) -> float:
-    """Считает количество часов в дневном окне [DAY_START, DAY_END) между двумя моментами."""
-    total = 0.0
-    cursor = since
-    while cursor < now:
-        day_start = cursor.replace(hour=_DAY_START_HOUR, minute=0, second=0, microsecond=0)
-        day_end = cursor.replace(hour=_DAY_END_HOUR, minute=0, second=0, microsecond=0)
-        window_start = max(cursor, day_start)
-        window_end = min(now, day_end)
-        if window_start < window_end:
-            total += (window_end - window_start).total_seconds() / 3600
-        cursor = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return total
-
-
-async def _food_reminder_loop(app) -> None:
-    global _last_reminder_sent_at
-    while True:
-        await asyncio.sleep(_CHECK_INTERVAL_SEC)
-        now = datetime.now(MSK)
-        if not (_DAY_START_HOUR <= now.hour < _DAY_END_HOUR):
-            continue
-        if _last_reminder_sent_at and (now - _last_reminder_sent_at).total_seconds() < _REMINDER_COOLDOWN_SEC:
-            continue
-        daytime_hours = _daytime_hours_since(_last_food_diary_at, now)
-        if daytime_hours >= _FOOD_GAP_HOURS:
-            logger.info("Sending food reminder (%.1f daytime h since last entry)", daytime_hours)
-            await app.bot.send_message(
-                chat_id=TG_ADMIN_CHAT_ID,
-                text=f"Ты не записывал еду уже {int(daytime_hours)} ч. Не забудь записать приём пищи!",
-            )
-            _last_reminder_sent_at = now
 
 
 def _is_drink_entry(config: dict, field_values: dict) -> bool:
@@ -283,7 +242,6 @@ async def _monthly_nutrition_report_loop(app) -> None:
 
 
 async def _post_init(app) -> None:
-    asyncio.create_task(_food_reminder_loop(app))
     asyncio.create_task(_daily_spending_report_loop(app))
     asyncio.create_task(_daily_nutrition_report_loop(app))
     asyncio.create_task(_weekly_nutrition_report_loop(app))
@@ -412,17 +370,19 @@ def _handle_merge(selected_config: dict, new_values: dict) -> tuple[str, int | N
     return "🔗 Объединил с предыдущей записью!\n\n" + "\n".join(changes), target["row_number"]
 
 
-async def _update_sheet_only_fields(selected_config: dict, field_values: dict) -> None:
+async def _update_sheet_only_fields(selected_config: dict, field_values: dict) -> int | None:
     """Дописать в только что созданную строку поля с sheet_only=true (например, чекбокс 'Напиток').
 
     Google Forms → Sheets пропагация занимает ~1-3 с, поэтому ждём появления строки с
     совпадающим текстовым полем (обычно 'Блюдо'/'Описание').
+
+    Возвращает row_number найденной строки (или None, если не нашли / нет sheet_only полей).
     """
     sheet_only_fields = [f for f in selected_config["fields"] if f.get("sheet_only")]
     if not sheet_only_fields:
-        return
+        return None
     if not any(field_values.get(f["entry_id"]) for f in sheet_only_fields):
-        return
+        return None
 
     spreadsheet_id = selected_config.get("spreadsheet_id", "")
     sheet_name = selected_config.get("sheet_name", "")
@@ -460,7 +420,7 @@ async def _update_sheet_only_fields(selected_config: dict, field_values: dict) -
         logger.warning(
             "Could not locate just-submitted row for sheet-only update (expected %r)", expected
         )
-        return
+        return None
 
     headers = target["headers"]
     updates: dict[int, str] = {}
@@ -482,6 +442,8 @@ async def _update_sheet_only_fields(selected_config: dict, field_values: dict) -
         )
         logger.info("Updated %d sheet-only field(s) in row %d",
                     len(updates), target["row_number"])
+
+    return target["row_number"]
 
 
 def _append_nutrition_comment(
@@ -526,10 +488,22 @@ def _append_nutrition_comment(
             recent = recent[: idx + 1]
         if not recent:
             return reply
-        analysis = analyze_recent_meals(recent, _meal_comment_history)
+
+        # Ограничиваем контекст приёмами того же дня — иначе нутрициолог
+        # путает вчерашние записи с сегодняшними и комментирует не ту еду.
+        target_date = (recent[-1].get("Дата") or "").strip()
+        if not target_date:
+            target_date = datetime.now(MSK).strftime("%Y-%m-%d")
+        recent = [r for r in recent if (r.get("Дата") or "").strip() in ("", target_date)]
+
+        # История комментариев тоже фильтруется по дате — вчерашние комментарии
+        # не должны притягивать вчерашний контекст в сегодняшний анализ.
+        previous_comments = [c for d, c in _meal_comment_history if d == target_date]
+
+        analysis = analyze_recent_meals(recent, previous_comments)
         if analysis:
             reply += f"\n\n{analysis}"
-            _meal_comment_history.append(analysis)
+            _meal_comment_history.append((target_date, analysis))
             if len(_meal_comment_history) > _MAX_COMMENT_HISTORY:
                 _meal_comment_history.pop(0)
     except Exception:
@@ -539,29 +513,36 @@ def _append_nutrition_comment(
 
 async def _submit_food_entry(selected_config: dict, field_values: dict) -> str:
     """Отправить запись в дневник питания + получить комментарий нутрициолога."""
-    global _last_food_diary_at, _last_food_entry_at
+    global _last_food_entry_at
     _apply_auto_defaults(selected_config, field_values)
     logger.info("Submitting food entry: %s", selected_config["form_name"])
     result = submit_form(selected_config, field_values)
     reply = f"Форма: {selected_config['form_name']}\n\n" + format_result(result)
 
-    # Напитки не сдвигают окно merge и не сбрасывают таймер напоминания о еде
+    # Напитки не сдвигают окно merge
     if not _is_drink_entry(selected_config, field_values):
-        now = datetime.now(MSK)
-        _last_food_diary_at = now
-        _last_food_entry_at = now
+        _last_food_entry_at = datetime.now(MSK)
 
     if not result["success"]:
         return reply
 
+    submitted_row_number: int | None = None
     try:
-        await _update_sheet_only_fields(selected_config, field_values)
+        submitted_row_number = await _update_sheet_only_fields(selected_config, field_values)
     except Exception:
         logger.exception("Error updating sheet-only fields")
 
+    if submitted_row_number is not None:
+        return _append_nutrition_comment(
+            selected_config, reply, focus_row_number=submitted_row_number
+        )
+
     just_added = {
-        field["name"]: field_values.get(field["entry_id"], "")
-        for field in selected_config["fields"]
+        "Дата": datetime.now(MSK).strftime("%Y-%m-%d"),
+        **{
+            field.get("column_name", field["name"]): field_values.get(field["entry_id"], "")
+            for field in selected_config["fields"]
+        },
     }
     return _append_nutrition_comment(selected_config, reply, extra_entry=just_added)
 
@@ -628,7 +609,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_message = update.message.text
     logger.info("Message from %s: %s", user_id, user_message)
 
-    global _pending_merge, _last_food_diary_at, _last_food_entry_at
+    global _pending_merge, _last_food_entry_at
 
     pre_replies: list[str] = []
     pending_handled_fully = False
@@ -652,9 +633,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 merge_reply = await _submit_food_entry(pending["config"], pending["new_values"])
             else:
                 merge_reply, merged_row = merge_result
-                now_merged = datetime.now(MSK)
-                _last_food_diary_at = now_merged
-                _last_food_entry_at = now_merged
+                _last_food_entry_at = datetime.now(MSK)
                 if merged_row is not None:
                     merge_reply = _append_nutrition_comment(
                         pending["config"], merge_reply, focus_row_number=merged_row
